@@ -1,23 +1,33 @@
 import os
+import asyncio
 from datetime import datetime
 import pytz
 from telegram import Bot
 
-token = os.getenv('TELEGRAM_BOT_TOKEN')
-chat_id = os.getenv('TELEGRAM_CHAT_ID')
-timezone = pytz.timezone('Africa/Lagos')
-now = datetime.now(timezone)
-hour = now.hour
+async def main():
+    TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+    TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-if 0 <= hour < 9:
-    message = 'Good morning! ☀️ Have a great day!'
-elif 18 <= hour < 24:
-    message = 'Good night! 🌙 Sleep well!'
-else:
-    print('No message to send at this hour.')
-    exit(0)
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID environment variables")
+        return
 
-print(f'Sending message: {message}')
-bot = Bot(token=token)
-bot.send_message(chat_id=chat_id, text=message)
-print("done")
+    timezone = pytz.timezone('Africa/Lagos')
+    now = datetime.now(timezone)
+    current_hour = now.hour
+    print(f"Current hour: {current_hour}")
+
+    if 0 <= current_hour < 9:
+        message = "Good morning! ☀️ Have a great day!"
+    elif 18 <= current_hour < 24:
+        message = "Good night! 🌙 Sleep well!"
+    else:
+        print("No message to send at this hour.")
+        return
+
+    print(f"Sending message: {message}")
+    bot = Bot(token=TELEGRAM_TOKEN)
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+
+if __name__ == "__main__":
+    asyncio.run(main())

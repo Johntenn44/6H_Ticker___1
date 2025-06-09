@@ -11,7 +11,7 @@ COINS = [
     "XMR/USDT",
     "DOGE/USDT",
     "VIRTUAL/USDT",
-    "PEPE/USDT",
+    "DOT/USDT",
     "SUI/USDT",
     "XLM/USDT",
     "MNT/USDT",

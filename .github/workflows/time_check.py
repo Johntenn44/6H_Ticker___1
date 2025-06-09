@@ -18,9 +18,9 @@ async def main():
     print(f"Current hour: {current_hour}")
 
     if 0 <= current_hour < 9:
-        message = "Good morning! ☀️ Have a great day!"
+        message = "It's {current hour} at {timezone}, Good morning! ☀️ Have a great day!"
     elif 18 <= current_hour < 24:
-        message = "Good night! 🌙 Sleep well!"
+        message = "It's {current hour} at {timezone}, Good night! 🌙 Sleep well!"
     else:
         print("No message to send at this hour.")
         return

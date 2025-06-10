@@ -18,10 +18,7 @@ async def main():
     print(f"Current hour: {current_hour}")
 
     if 0 <= current_hour < 5:
-        message = f"It's between 12AM and 5AM, Good morning! ☀️ Have a great day!-Confirmed trends, only on second mention
--If CP touches low purple after trend identification trend facing reversal may occur
--If CP touches trend purple before trend identification reversal may occur
--green before purple, continues"
+        message = f"It's between 12AM and 5AM, Good morning! ☀️ Have a great day!---Confirmed trends, only on second mention---If CP touches low purple after trend identification trend facing reversal may occur---If CP touches trend purple before trend identification reversal may occur---green before purple, continues"
     elif 18 <= current_hour < 24:
         message = "It's between 6PM and 12AM, Good night! 🌙 Sleep well!"
     else:

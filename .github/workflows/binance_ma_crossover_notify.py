@@ -1,91 +1,80 @@
 import os
 import ccxt
 import pandas as pd
+import numpy as np
 import requests
 from datetime import datetime
 
 # --- CONFIGURATION ---
 
 COINS = [
-    "XRP/USDT",
-    "XMR/USDT",
-    "GMX/USDT",
-    "LUNA/USDT",
-    "TRX/USDT",
-    "EIGEN/USDT",
-    "APE/USDT",
-    "WAVES/USDT",
-    "PLUME/USDT",
-    "SUSHI/USDT",
-    "DOGE/USDT",
-    "VIRTUAL/USDT",
-    "CAKE/USDT",
-    "GRASS/USDT",
-    "AAVE/USDT",
-    "SUI/USDT",
-    "ARB/USDT",
-    "XLM/USDT",
-    "MNT/USDT",
-    "LTC/USDT",
-    "NEAR/USDT",
-    # Add more symbols here
+    "XRP/USDT", "XMR/USDT", "GMX/USDT", "LUNA/USDT", "TRX/USDT",
+    "EIGEN/USDT", "APE/USDT", "WAVES/USDT", "PLUME/USDT", "SUSHI/USDT",
+    "DOGE/USDT", "VIRTUAL/USDT", "CAKE/USDT", "GRASS/USDT", "AAVE/USDT",
+    "SUI/USDT", "ARB/USDT", "XLM/USDT", "MNT/USDT", "LTC/USDT", "NEAR/USDT",
 ]
 
 EXCHANGE_ID = 'kucoin'
-INTERVAL = '6h'      # Use 6-hour candles (change to '4h' if you want 4-hour candles)
-LOOKBACK = 210       # Number of candles to fetch (must be >= 200)
+INTERVAL = '12h'      # 12-hour candles
+LOOKBACK = 210       # Number of candles to fetch (>= 200)
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- INDICATOR CALCULATION ---
+# --- INDICATOR CALCULATIONS ---
 
-def add_indicators(df):
-    df['EMA8'] = df['close'].ewm(span=8, adjust=False).mean()
-    df['EMA13'] = df['close'].ewm(span=13, adjust=False).mean()
-    df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
-    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
-    df['MA50'] = df['close'].rolling(window=50).mean()
-    df['MA200'] = df['close'].rolling(window=200).mean()
-    return df
+def calculate_rsi(series, period=13):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=3):
+    rsi = calculate_rsi(df['close'], rsi_length)
+    min_rsi = rsi.rolling(window=stoch_length).min()
+    max_rsi = rsi.rolling(window=stoch_length).max()
+    stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi) * 100
+
+    k = stoch_rsi.rolling(window=smooth_k).mean()
+    d = k.rolling(window=smooth_d).mean()
+    return k, d
+
+def calculate_wr(df, length):
+    highest_high = df['high'].rolling(window=length).max()
+    lowest_low = df['low'].rolling(window=length).min()
+    wr = (highest_high - df['close']) / (highest_high - lowest_low) * -100
+    return wr
 
 # --- TREND LOGIC ---
 
-def analyze_trend(df):
-    results = {}
-    # Use last two closes for trend analysis
-    cp1 = df['close'].iloc[-1]   # Most recent close
-    cp2 = df['close'].iloc[-2]   # Previous close
+def analyze_stoch_rsi_trend(k, d):
+    # %K crossing above %D and %K < 80 → Uptrend
+    # %K crossing below %D and %K > 20 → Downtrend
+    if len(k) < 2 or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]) or pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]):
+        return "No clear Stoch RSI trend"
+    if k.iloc[-2] < d.iloc[-2] and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80:
+        return "Uptrend"
+    elif k.iloc[-2] > d.iloc[-2] and k.iloc[-1] < d.iloc[-1] and k.iloc[-1] > 20:
+        return "Downtrend"
+    else:
+        return "No clear Stoch RSI trend"
 
-    A1 = df['EMA8'].iloc[-1]
-    B1 = df['EMA13'].iloc[-1]
-    C1 = df['EMA21'].iloc[-1]
-    D1 = df['EMA50'].iloc[-1]
-    E1 = df['EMA200'].iloc[-1]
-    MA50_1 = df['MA50'].iloc[-1]
-    MA200_1 = df['MA200'].iloc[-1]
-
-    A2 = df['EMA8'].iloc[-2]
-    B2 = df['EMA13'].iloc[-2]
-    C2 = df['EMA21'].iloc[-2]
-    D2 = df['EMA50'].iloc[-2]
-    E2 = df['EMA200'].iloc[-2]
-    MA50_2 = df['MA50'].iloc[-2]
-    MA200_2 = df['MA200'].iloc[-2]
-
-    # --- Start Conditions: both last closes must meet the trend condition ---
-    if (E1 > cp1 > A1 > B1 > C1 > D1 > MA50_1) and (cp1 < MA200_1) and \
-       (E2 > cp2 > A2 > B2 > C2 > D2 > MA50_2) and (cp2 < MA200_2):
-        results['start'] = 'uptrend'
-    elif (E1 < cp1 < A1 < B1 < C1 < D1 < MA50_1) and (cp1 > MA200_1) and \
-         (E2 < cp2 < A2 < B2 < C2 < D2 < MA50_2) and (cp2 > MA200_2):
-        results['start'] = 'downtrend'
-
-    results['values'] = {
-        'cp1': cp1, 'cp2': cp2, 'EMA8': A1, 'EMA13': B1, 'EMA21': C1,
-        'EMA50': D1, 'EMA200': E1, 'MA50': MA50_1, 'MA200': MA200_1
-    }
-    return results
+def analyze_wr_trend(wr_series):
+    # Detect WR crossing below -80 (oversold buy signal)
+    # Detect WR crossing above -20 (overbought sell signal)
+    if len(wr_series) < 2 or pd.isna(wr_series.iloc[-2]) or pd.isna(wr_series.iloc[-1]):
+        return "No clear WR trend"
+    prev, curr = wr_series.iloc[-2], wr_series.iloc[-1]
+    if prev > -80 and curr <= -80:
+        return "WR Oversold - Buy signal"
+    elif prev < -20 and curr >= -20:
+        return "WR Overbought - Sell signal"
+    else:
+        return "No clear WR trend"
 
 # --- DATA FETCHING ---
 
@@ -98,7 +87,7 @@ def fetch_ohlcv_ccxt(symbol, timeframe, limit):
     )
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    df['close'] = df['close'].astype(float)
+    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
     return df
 
 # --- TELEGRAM NOTIFICATION ---
@@ -117,36 +106,49 @@ def send_telegram_message(message):
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
-    messages = []
+    coins_with_trends = {}
+
+    WR_PERIODS = [3, 8, 13, 55, 144, 233]
+
     for symbol in COINS:
         try:
             df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
-            if len(df) < 200:
+            if len(df) < max(13, 8, 5, 3, max(WR_PERIODS)):
                 print(f"Not enough data for {symbol}")
                 continue
-            df = add_indicators(df)
-            trend = analyze_trend(df)
-            # Format message if any condition is met
-            if 'start' in trend:
-                vals = trend['values']
-                msg = (
-                    f"<b>Kucoin {INTERVAL.upper()} Trend Alert ({dt})</b>\n"
-                    f"<b>Symbol:</b> <code>{symbol}</code>\n"
-                    f"Start: <b>{trend['start']}</b>\n"
-                    f"\n<code>cp1={vals['cp1']:.5f}, cp2={vals['cp2']:.5f}, EMA8={vals['EMA8']:.5f}, EMA13={vals['EMA13']:.5f}, "
-                    f"EMA21={vals['EMA21']:.5f}, EMA50={vals['EMA50']:.5f}, EMA200={vals['EMA200']:.5f}, "
-                    f"MA50={vals['MA50']:.5f}, MA200={vals['MA200']:.5f}</code>"
-                )
-                messages.append(msg)
+
+            # Stochastic RSI
+            k, d = calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=3)
+            stoch_trend = analyze_stoch_rsi_trend(k, d)
+
+            # Williams %R for each period
+            wr_trends = {}
+            for period in WR_PERIODS:
+                wr = calculate_wr(df, period)
+                wr_trends[period] = analyze_wr_trend(wr)
+
+            # Filter WR signals (ignore "No clear WR trend")
+            wr_signals = [f"WR{p}: {t}" for p, t in wr_trends.items() if t != "No clear WR trend"]
+
+            # Only alert if Stoch RSI trend or any WR signal exists
+            if stoch_trend != "No clear Stoch RSI trend" or wr_signals:
+                coins_with_trends[symbol] = {
+                    "StochRSI": stoch_trend,
+                    "WR": ", ".join(wr_signals) if wr_signals else "No WR signals"
+                }
+
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-    if messages:
-        for msg in messages:
-            send_telegram_message(msg)
+    if coins_with_trends:
+        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI + Williams %R Alert ({dt})</b>",
+                     "Coins with detected trends:\n"]
+        for coin, trends in coins_with_trends.items():
+            msg_lines.append(f"{coin} - StochRSI Trend: {trends['StochRSI']} | WR Signals: {trends['WR']}")
+        msg = "\n".join(msg_lines)
+        send_telegram_message(msg)
     else:
-        # Send "No trend signals for any coin" if there are no signals
-        send_telegram_message("No trend signals for any coin.")
+        send_telegram_message("No coins satisfy the Stochastic RSI or Williams %R trend conditions at this time.")
 
 if __name__ == "__main__":
     main()

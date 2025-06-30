@@ -3,7 +3,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
 
@@ -16,7 +16,7 @@ COINS = [
 
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '12h'      # 12-hour candles
-LOOKBACK = 210       # Number of candles to fetch (>= 200)
+LOOKBACK = 500        # fetch enough data for indicators + backtest
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -51,24 +51,21 @@ def calculate_wr(df, length):
 
 # --- TREND LOGIC ---
 
-def analyze_stoch_rsi_trend(k, d):
-    # %K crossing above %D and %K < 80 → Uptrend
-    # %K crossing below %D and %K > 20 → Downtrend
-    if len(k) < 2 or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]) or pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]):
+def analyze_stoch_rsi_trend(k, d, idx):
+    # Use index to check crossover at idx and idx-1
+    if idx < 1 or pd.isna(k.iloc[idx-1]) or pd.isna(d.iloc[idx-1]) or pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]):
         return "No clear Stoch RSI trend"
-    if k.iloc[-2] < d.iloc[-2] and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80:
+    if k.iloc[idx-1] < d.iloc[idx-1] and k.iloc[idx] > d.iloc[idx] and k.iloc[idx] < 80:
         return "Uptrend"
-    elif k.iloc[-2] > d.iloc[-2] and k.iloc[-1] < d.iloc[-1] and k.iloc[-1] > 20:
+    elif k.iloc[idx-1] > d.iloc[idx-1] and k.iloc[idx] < d.iloc[idx] and k.iloc[idx] > 20:
         return "Downtrend"
     else:
         return "No clear Stoch RSI trend"
 
-def analyze_wr_trend(wr_series):
-    # Detect WR crossing below -80 (oversold buy signal)
-    # Detect WR crossing above -20 (overbought sell signal)
-    if len(wr_series) < 2 or pd.isna(wr_series.iloc[-2]) or pd.isna(wr_series.iloc[-1]):
+def analyze_wr_trend(wr_series, idx):
+    if idx < 1 or pd.isna(wr_series.iloc[idx-1]) or pd.isna(wr_series.iloc[idx]):
         return "No clear WR trend"
-    prev, curr = wr_series.iloc[-2], wr_series.iloc[-1]
+    prev, curr = wr_series.iloc[idx-1], wr_series.iloc[idx]
     if prev > -80 and curr <= -80:
         return "WR Oversold - Buy signal"
     elif prev < -20 and curr >= -20:
@@ -102,53 +99,94 @@ def send_telegram_message(message):
     resp = requests.post(url, data=payload)
     resp.raise_for_status()
 
+# --- BACKTEST LOGIC ---
+
+def backtest(df):
+    k, d = calculate_stoch_rsi(df)
+    WR_PERIODS = [3, 8, 13, 55, 144, 233]
+    wr_dict = {p: calculate_wr(df, p) for p in WR_PERIODS}
+
+    position = 0  # 0 = no position, 1 = long
+    entry_price = 0.0
+    trades = []
+
+    backtest_start = df.index[-1] - timedelta(days=10)
+    df_bt = df.loc[df.index >= backtest_start].copy()
+    k_bt = k.loc[df_bt.index]
+    d_bt = d.loc[df_bt.index]
+    wr_bt = {p: wr.loc[df_bt.index] for p, wr in wr_dict.items()}
+
+    for i in range(1, len(df_bt)):
+        # Check Stoch RSI trend
+        stoch_trend = analyze_stoch_rsi_trend(k_bt, d_bt, i)
+
+        # Aggregate WR trends: consider buy if any WR oversold, sell if any WR overbought
+        wr_trends = [analyze_wr_trend(wr_bt[p], i) for p in WR_PERIODS]
+        buy_signal = any("Oversold" in t for t in wr_trends)
+        sell_signal = any("Overbought" in t for t in wr_trends)
+
+        # Entry condition: Stoch RSI Uptrend or any WR oversold signal, and no position
+        if position == 0 and (stoch_trend == "Uptrend" or buy_signal):
+            position = 1
+            entry_price = df_bt['close'].iloc[i]
+            entry_date = df_bt.index[i]
+
+        # Exit condition: Stoch RSI Downtrend or any WR overbought signal, and holding position
+        elif position == 1 and (stoch_trend == "Downtrend" or sell_signal):
+            exit_price = df_bt['close'].iloc[i]
+            exit_date = df_bt.index[i]
+            ret = (exit_price - entry_price) / entry_price
+            trades.append((entry_date.strftime('%Y-%m-%d %H:%M'), exit_date.strftime('%Y-%m-%d %H:%M'), ret))
+            position = 0
+            entry_price = 0.0
+
+    # Close any open position at last candle
+    if position == 1:
+        exit_price = df_bt['close'].iloc[-1]
+        exit_date = df_bt.index[-1]
+        ret = (exit_price - entry_price) / entry_price
+        trades.append((entry_date.strftime('%Y-%m-%d %H:%M'), exit_date.strftime('%Y-%m-%d %H:%M'), ret))
+
+    # Calculate cumulative return
+    cumulative_return = np.prod([1 + t[2] for t in trades]) - 1 if trades else 0
+
+    return cumulative_return, trades
+
 # --- MAIN LOGIC ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
-    coins_with_trends = {}
-
-    WR_PERIODS = [3, 8, 13, 55, 144, 233]
+    results = {}
 
     for symbol in COINS:
         try:
             df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
-            if len(df) < max(13, 8, 5, 3, max(WR_PERIODS)):
+            if len(df) < LOOKBACK:
                 print(f"Not enough data for {symbol}")
                 continue
 
-            # Stochastic RSI
-            k, d = calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=3)
-            stoch_trend = analyze_stoch_rsi_trend(k, d)
-
-            # Williams %R for each period
-            wr_trends = {}
-            for period in WR_PERIODS:
-                wr = calculate_wr(df, period)
-                wr_trends[period] = analyze_wr_trend(wr)
-
-            # Filter WR signals (ignore "No clear WR trend")
-            wr_signals = [f"WR{p}: {t}" for p, t in wr_trends.items() if t != "No clear WR trend"]
-
-            # Only alert if Stoch RSI trend or any WR signal exists
-            if stoch_trend != "No clear Stoch RSI trend" or wr_signals:
-                coins_with_trends[symbol] = {
-                    "StochRSI": stoch_trend,
-                    "WR": ", ".join(wr_signals) if wr_signals else "No WR signals"
-                }
+            cum_ret, trades = backtest(df)
+            results[symbol] = (cum_ret, trades)
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-    if coins_with_trends:
-        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI + Williams %R Alert ({dt})</b>",
-                     "Coins with detected trends:\n"]
-        for coin, trends in coins_with_trends.items():
-            msg_lines.append(f"{coin} - StochRSI Trend: {trends['StochRSI']} | WR Signals: {trends['WR']}")
+    if results:
+        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI + WR 10-Day Backtest ({dt})</b>",
+                     "Cumulative returns and trades:\n"]
+        for coin, (ret, trades) in sorted(results.items(), key=lambda x: x[1][0], reverse=True):
+            msg_lines.append(f"{coin}: {ret*100:.2f}% cumulative return")
+            if trades:
+                for entry_date, exit_date, trade_ret in trades:
+                    msg_lines.append(f"  Entry: {entry_date}  Exit: {exit_date}  Return: {trade_ret*100:.2f}%")
+            else:
+                msg_lines.append("  No trades executed.")
+            msg_lines.append("")  # blank line
+
         msg = "\n".join(msg_lines)
         send_telegram_message(msg)
     else:
-        send_telegram_message("No coins satisfy the Stochastic RSI or Williams %R trend conditions at this time.")
+        send_telegram_message("No backtest results available for the selected coins.")
 
 if __name__ == "__main__":
     main()

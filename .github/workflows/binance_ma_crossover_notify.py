@@ -117,7 +117,7 @@ def backtest(df):
     entry_price = 0.0
     trades = []
 
-    backtest_start = df.index[-1] - timedelta(days=10)
+    backtest_start = df.index[-1] - timedelta(days=5)  # 5-day backtest
     df_bt = df.loc[df.index >= backtest_start].copy()
     k_bt = k.loc[df_bt.index]
     d_bt = d.loc[df_bt.index]
@@ -174,7 +174,7 @@ def main():
             traceback.print_exc()
 
     if results:
-        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI + WR 10-Day Backtest ({dt})</b>",
+        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI + WR 5-Day Backtest ({dt})</b>",
                      "Cumulative returns and trades:\n"]
         for coin, (ret, trades) in sorted(results.items(), key=lambda x: x[1][0], reverse=True):
             msg_lines.append(f"{coin}: {ret*100:.2f}% cumulative return")

@@ -149,7 +149,9 @@ def backtest(df):
         trades.append((entry_date.strftime('%Y-%m-%d %H:%M'), exit_date.strftime('%Y-%m-%d %H:%M'), ret))
 
     cumulative_return = np.prod([1 + t[2] for t in trades]) - 1 if trades else 0
-    return cumulative_return, trades
+    net_profit_loss = sum(t[2] for t in trades) if trades else 0
+
+    return cumulative_return, net_profit_loss, trades
 
 # --- MAIN LOGIC ---
 
@@ -165,9 +167,9 @@ def main():
                 print(f"Not enough data for {symbol} (got {len(df)} candles), skipping.")
                 continue
 
-            cum_ret, trades = backtest(df)
-            results[symbol] = (cum_ret, trades)
-            print(f"Backtest complete for {symbol}: {cum_ret*100:.2f}% cumulative return")
+            cum_ret, net_pl, trades = backtest(df)
+            results[symbol] = (cum_ret, net_pl, trades)
+            print(f"Backtest complete for {symbol}: Cumulative Return: {cum_ret*100:.2f}%, Net P/L: {net_pl*100:.2f}%")
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
@@ -175,9 +177,9 @@ def main():
 
     if results:
         msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI + WR 5-Day Backtest ({dt})</b>",
-                     "Cumulative returns and trades:\n"]
-        for coin, (ret, trades) in sorted(results.items(), key=lambda x: x[1][0], reverse=True):
-            msg_lines.append(f"{coin}: {ret*100:.2f}% cumulative return")
+                     "Cumulative returns, net profit/loss, and trades:\n"]
+        for coin, (cum_ret, net_pl, trades) in sorted(results.items(), key=lambda x: x[1][0], reverse=True):
+            msg_lines.append(f"{coin}: Cumulative Return: {cum_ret*100:.2f}%, Net Profit/Loss: {net_pl*100:.2f}%")
             if trades:
                 for entry_date, exit_date, trade_ret in trades:
                     msg_lines.append(f"  Entry: {entry_date}  Exit: {exit_date}  Return: {trade_ret*100:.2f}%")

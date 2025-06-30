@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime, timedelta
+import traceback  # For detailed error logging
 
 # --- CONFIGURATION ---
 
@@ -21,6 +22,9 @@ LOOKBACK = 500        # fetch enough data for indicators + backtest
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise ValueError("Telegram bot token or chat ID not set in environment variables.")
+
 # --- INDICATOR CALCULATIONS ---
 
 def calculate_rsi(series, period=13):
@@ -37,8 +41,10 @@ def calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=
     rsi = calculate_rsi(df['close'], rsi_length)
     min_rsi = rsi.rolling(window=stoch_length).min()
     max_rsi = rsi.rolling(window=stoch_length).max()
-    stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi) * 100
-
+    denominator = max_rsi - min_rsi
+    denominator = denominator.replace(0, np.nan)  # avoid division by zero
+    stoch_rsi = (rsi - min_rsi) / denominator * 100
+    stoch_rsi = stoch_rsi.fillna(method='ffill')
     k = stoch_rsi.rolling(window=smooth_k).mean()
     d = k.rolling(window=smooth_d).mean()
     return k, d
@@ -46,13 +52,14 @@ def calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=
 def calculate_wr(df, length):
     highest_high = df['high'].rolling(window=length).max()
     lowest_low = df['low'].rolling(window=length).min()
-    wr = (highest_high - df['close']) / (highest_high - lowest_low) * -100
-    return wr
+    denominator = highest_high - lowest_low
+    denominator = denominator.replace(0, np.nan)  # avoid division by zero
+    wr = (highest_high - df['close']) / denominator * -100
+    return wr.fillna(method='ffill')
 
 # --- TREND LOGIC ---
 
 def analyze_stoch_rsi_trend(k, d, idx):
-    # Use index to check crossover at idx and idx-1
     if idx < 1 or pd.isna(k.iloc[idx-1]) or pd.isna(d.iloc[idx-1]) or pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]):
         return "No clear Stoch RSI trend"
     if k.iloc[idx-1] < d.iloc[idx-1] and k.iloc[idx] > d.iloc[idx] and k.iloc[idx] < 80:
@@ -117,21 +124,16 @@ def backtest(df):
     wr_bt = {p: wr.loc[df_bt.index] for p, wr in wr_dict.items()}
 
     for i in range(1, len(df_bt)):
-        # Check Stoch RSI trend
         stoch_trend = analyze_stoch_rsi_trend(k_bt, d_bt, i)
-
-        # Aggregate WR trends: consider buy if any WR oversold, sell if any WR overbought
         wr_trends = [analyze_wr_trend(wr_bt[p], i) for p in WR_PERIODS]
         buy_signal = any("Oversold" in t for t in wr_trends)
         sell_signal = any("Overbought" in t for t in wr_trends)
 
-        # Entry condition: Stoch RSI Uptrend or any WR oversold signal, and no position
         if position == 0 and (stoch_trend == "Uptrend" or buy_signal):
             position = 1
             entry_price = df_bt['close'].iloc[i]
             entry_date = df_bt.index[i]
 
-        # Exit condition: Stoch RSI Downtrend or any WR overbought signal, and holding position
         elif position == 1 and (stoch_trend == "Downtrend" or sell_signal):
             exit_price = df_bt['close'].iloc[i]
             exit_date = df_bt.index[i]
@@ -140,16 +142,13 @@ def backtest(df):
             position = 0
             entry_price = 0.0
 
-    # Close any open position at last candle
     if position == 1:
         exit_price = df_bt['close'].iloc[-1]
         exit_date = df_bt.index[-1]
         ret = (exit_price - entry_price) / entry_price
         trades.append((entry_date.strftime('%Y-%m-%d %H:%M'), exit_date.strftime('%Y-%m-%d %H:%M'), ret))
 
-    # Calculate cumulative return
     cumulative_return = np.prod([1 + t[2] for t in trades]) - 1 if trades else 0
-
     return cumulative_return, trades
 
 # --- MAIN LOGIC ---
@@ -160,16 +159,19 @@ def main():
 
     for symbol in COINS:
         try:
+            print(f"Fetching data for {symbol}...")
             df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
             if len(df) < LOOKBACK:
-                print(f"Not enough data for {symbol}")
+                print(f"Not enough data for {symbol} (got {len(df)} candles), skipping.")
                 continue
 
             cum_ret, trades = backtest(df)
             results[symbol] = (cum_ret, trades)
+            print(f"Backtest complete for {symbol}: {cum_ret*100:.2f}% cumulative return")
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
+            traceback.print_exc()
 
     if results:
         msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI + WR 10-Day Backtest ({dt})</b>",
@@ -181,7 +183,7 @@ def main():
                     msg_lines.append(f"  Entry: {entry_date}  Exit: {exit_date}  Return: {trade_ret*100:.2f}%")
             else:
                 msg_lines.append("  No trades executed.")
-            msg_lines.append("")  # blank line
+            msg_lines.append("")
 
         msg = "\n".join(msg_lines)
         send_telegram_message(msg)
